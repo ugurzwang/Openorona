@@ -1,0 +1,1 @@
+İlk F-Droid yayını öncesinde Android uygulama kimliği io.github.ugurzwang.openorona olarak güncellendi. Android bunu ayrı bir uygulama olarak tanır; önceki uygulamanın kayıtları otomatik aktarılmaz.

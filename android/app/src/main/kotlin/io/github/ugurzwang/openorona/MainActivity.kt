@@ -1,4 +1,4 @@
-package com.fanorona.fanorona_game
+package io.github.ugurzwang.openorona
 
 import io.flutter.embedding.android.FlutterActivity
 

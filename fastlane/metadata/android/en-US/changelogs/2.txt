@@ -1,0 +1,1 @@
+Updated the Android application ID to io.github.ugurzwang.openorona before the first F-Droid release. Android treats this as a separate app; saved games from the previous application ID are not automatically transferred.
