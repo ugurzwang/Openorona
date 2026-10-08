@@ -1,0 +1,56 @@
+Categories:
+  - Games
+License: MIT
+AuthorName: zwang
+AuthorWebSite: https://github.com/ugurzwang
+SourceCode: https://github.com/ugurzwang/Openorona
+IssueTracker: https://github.com/ugurzwang/Openorona/issues
+
+Name: Openorona
+Summary: Play Fanorona against the computer or a friend
+Description: |-
+  Openorona brings Fanorona, the traditional strategy board game from
+  Madagascar, to Android.
+
+  * Three board variants: Fanorona-Telo (3x3), Fanorona-Dimy (5x5), and
+    Fanorona-Tsivy (9x5)
+  * Computer opponent with five difficulty levels
+  * Pass and play with optional per-player timers
+  * Automatic saving and continue
+  * Move undo, board themes, and optional vibration
+
+  No ads or account required. Games are saved on your device.
+
+RepoType: git
+Repo: https://github.com/ugurzwang/Openorona.git
+
+Builds:
+  - versionName: 1.0.0
+    versionCode: 1
+    commit: v1.0.0
+    output: build/app/outputs/flutter-apk/app-release.apk
+    srclibs:
+      - flutter@3.47.5
+    rm:
+      - ios
+      - linux
+      - macos
+      - web
+      - windows
+    prebuild:
+      - sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
+      - export PUB_CACHE=$(pwd)/.pub-cache
+      - $$flutter$$/bin/flutter config --no-analytics
+      - $$flutter$$/bin/flutter pub get --enforce-lockfile
+    scandelete:
+      - .pub-cache
+    build:
+      - export PUB_CACHE=$(pwd)/.pub-cache
+      - $$flutter$$/bin/flutter build apk --release --no-pub
+    ndk: 28.2.13676358
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags ^v[\d.]+$
+UpdateCheckData: pubspec.yaml|version:\s.+\+(\d+)|.|version:\s(.+)\+
+CurrentVersion: 1.0.0
+CurrentVersionCode: 1

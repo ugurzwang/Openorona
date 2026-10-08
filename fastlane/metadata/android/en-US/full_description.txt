@@ -1,0 +1,9 @@
+Openorona brings Fanorona, the traditional strategy board game from Madagascar, to Android.
+
+• Three board variants: Fanorona-Telo (3×3), Fanorona-Dimy (5×5), and Fanorona-Tsivy (9×5)
+• Computer opponent with five difficulty levels
+• Pass and play with optional per-player timers
+• Automatic saving and continue
+• Move undo, board themes, and optional vibration
+
+No ads or account required. Games are saved on your device.
