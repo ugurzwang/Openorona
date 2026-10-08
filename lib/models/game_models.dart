@@ -9,11 +9,11 @@ enum FanoronaVariant {
 }
 
 enum BotDifficulty {
-  easy('Easy', 'Plays casually with occasional mistakes.'),
-  medium('Medium', 'Standard tactical play with 2-ply search.'),
-  hard('Hard', 'Strategic board control and 3-ply analysis.'),
-  expert('Expert', 'Deep positional awareness and counter-attacks.'),
-  master('Master', 'Uncompromising depth, full chains, and optimal play.');
+  easy('Easy', 'Simple moves without looking ahead.'),
+  medium('Medium', 'Looks ahead to your next reply.'),
+  hard('Hard', 'Plans capture chains and counter-attacks.'),
+  expert('Expert', 'Looks further ahead with positional play.'),
+  master('Master', 'Our deepest search with extra capture analysis.');
 
   final String displayName;
   final String description;

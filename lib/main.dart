@@ -465,6 +465,7 @@ class GameScreen extends StatefulWidget {
   final bool vibrationEnabled;
   final int timeLimitMinutes;
   final Map<String, dynamic>? savedGame;
+  final BotMoveSelector botMoveSelector;
 
   const GameScreen({
     super.key,
@@ -475,6 +476,7 @@ class GameScreen extends StatefulWidget {
     this.vibrationEnabled = true,
     this.timeLimitMinutes = 0,
     this.savedGame,
+    this.botMoveSelector = FanoronaAI.getMoveAsync,
   });
 
   @override
@@ -893,42 +895,51 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     unawaited(_saveGame());
   }
 
-  void _triggerBotMove() {
+  void _triggerBotMove() => _scheduleBotMove(const Duration(milliseconds: 500));
+
+  void _triggerBotChain() => _scheduleBotMove(const Duration(milliseconds: 400));
+
+  void _scheduleBotMove(Duration delay) {
     final session = _gameSession;
     setState(() => _isBotThinking = true);
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (!mounted || session != _gameSession) return;
-      final bestMove = FanoronaAI.getMove(
-        board: _board,
-        botPlayer: PieceType.black,
-        difficulty: widget.botDifficulty,
-        variant: widget.variant,
-      );
-
-      setState(() => _isBotThinking = false);
-
-      if (bestMove != null) {
-        _animatePieceSlide(bestMove);
-      } else {
-        _endTurn();
+    Future.delayed(delay, () async {
+      if (!mounted || session != _gameSession) {
+        return;
       }
-    });
-  }
-
-  void _triggerBotChain() {
-    final session = _gameSession;
-    setState(() => _isBotThinking = true);
-    Future.delayed(const Duration(milliseconds: 400), () {
-      if (!mounted || session != _gameSession) return;
-      final nextMove = FanoronaAI.getMove(
-        board: _board,
-        botPlayer: PieceType.black,
-        difficulty: widget.botDifficulty,
-        variant: widget.variant,
-        chainedPiece: _chainedPiece,
-        visitedInTurn: _visitedPoints,
-        lastDirectionVector: _lastDirection,
-      );
+      final board = Map<BoardPoint, PieceType>.of(_board);
+      final visited = List<BoardPoint>.of(_visitedPoints);
+      final chain = _chainedPiece;
+      final direction = _lastDirection;
+      Move? nextMove;
+      try {
+        nextMove = await widget.botMoveSelector(
+          board: board,
+          botPlayer: PieceType.black,
+          difficulty: widget.botDifficulty,
+          variant: widget.variant,
+          chainedPiece: chain,
+          visitedInTurn: visited,
+          lastDirectionVector: direction,
+        );
+      } catch (error, stack) {
+        if (!mounted || session != _gameSession) {
+          return;
+        }
+        FlutterError.reportError(FlutterErrorDetails(
+          exception: error, stack: stack, library: 'Fanorona AI',
+        ));
+        // If background dispatch fails, finish this move with a cheap legal
+        // choice instead of leaving the game stuck on "Bot is thinking".
+        nextMove = FanoronaAI.getMove(
+          board: board, botPlayer: PieceType.black,
+          difficulty: BotDifficulty.easy, variant: widget.variant,
+          chainedPiece: chain, visitedInTurn: visited,
+          lastDirectionVector: direction,
+        );
+      }
+      if (!mounted || session != _gameSession) {
+        return;
+      }
 
       setState(() => _isBotThinking = false);
 

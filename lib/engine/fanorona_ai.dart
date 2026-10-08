@@ -1,9 +1,51 @@
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import '../models/game_models.dart';
 import 'fanorona_engine.dart';
 
+typedef BotMoveSelector = Future<Move?> Function({
+  required Map<BoardPoint, PieceType> board,
+  required PieceType botPlayer,
+  required BotDifficulty difficulty,
+  required FanoronaVariant variant,
+  BoardPoint? chainedPiece,
+  List<BoardPoint>? visitedInTurn,
+  BoardPoint? lastDirectionVector,
+});
+
 class FanoronaAI {
   static final Random _rng = Random();
+
+  static Future<Move?> getMoveAsync({
+    required Map<BoardPoint, PieceType> board,
+    required PieceType botPlayer,
+    required BotDifficulty difficulty,
+    required FanoronaVariant variant,
+    BoardPoint? chainedPiece,
+    List<BoardPoint>? visitedInTurn,
+    BoardPoint? lastDirectionVector,
+  }) {
+    // Copy before dispatch: restart/undo must not change an in-flight position.
+    return compute(_solve, _BotPosition(
+      board: Map.of(board),
+      player: botPlayer,
+      difficulty: difficulty,
+      variant: variant,
+      chainedPiece: chainedPiece,
+      visited: List.of(visitedInTurn ?? const <BoardPoint>[]),
+      direction: lastDirectionVector,
+    ));
+  }
+
+  static Move? _solve(_BotPosition position) => getMove(
+    board: position.board,
+    botPlayer: position.player,
+    difficulty: position.difficulty,
+    variant: position.variant,
+    chainedPiece: position.chainedPiece,
+    visitedInTurn: position.visited,
+    lastDirectionVector: position.direction,
+  );
 
   static Move? getMove({
     required Map<BoardPoint, PieceType> board,
@@ -14,6 +56,10 @@ class FanoronaAI {
     List<BoardPoint>? visitedInTurn,
     BoardPoint? lastDirectionVector,
   }) {
+    final opponent = _other(botPlayer);
+    if (!board.containsValue(botPlayer) || !board.containsValue(opponent)) {
+      return null;
+    }
     final legalMoves = FanoronaEngine.getLegalMoves(
       board: board,
       player: botPlayer,
@@ -22,403 +68,264 @@ class FanoronaAI {
       visitedInTurn: visitedInTurn,
       lastDirectionVector: lastDirectionVector,
     );
+    if (legalMoves.isEmpty) {
+      return null;
+    }
 
-    if (legalMoves.isEmpty) return null;
-
-    // ==========================================
-    // 1. EASY (Acemi)
-    // ==========================================
+    // Easy sees only the immediate move. Variety is limited to positions with
+    // similar scores; it never switches between a deep search and a random blunder.
+    final scored = [for (final move in legalMoves) (
+      move: move,
+      score: _evaluate(_afterMove(board, move, botPlayer), botPlayer, variant),
+    )];
+    final bestScore = scored.map((entry) => entry.score).reduce(max);
+    final candidates = scored.where((entry) => entry.score >= bestScore - 20).toList();
+    Move? bestMove = candidates[_rng.nextInt(candidates.length)].move;
     if (difficulty == BotDifficulty.easy) {
-      // %65 ihtimalle tamamen rastgele bir yasal hamle seçer
-      if (_rng.nextDouble() < 0.65) {
-        return legalMoves[_rng.nextInt(legalMoves.length)];
-      }
-      // Kalan %35'te sadece anlık en çok taş yiyeni alır (derinlik 1)
-      legalMoves.sort((a, b) => b.capturedPieces.length.compareTo(a.capturedPieces.length));
-      return legalMoves.first;
+      return bestMove;
     }
 
-    // ==========================================
-    // 2. MEDIUM (Orta)
-    // ==========================================
-    if (difficulty == BotDifficulty.medium) {
-      if (_rng.nextDouble() < 0.25) {
-        // Arada bir taktiksel hata payı
-        return legalMoves[_rng.nextInt(legalMoves.length)];
-      }
-      return _findBestMoveMinimax(
-        board: board,
-        legalMoves: legalMoves,
-        visitedInTurn: visitedInTurn,
-        botPlayer: botPlayer,
-        variant: variant,
-        maxDepth: 2,
-        useAdvancedHeuristics: false,
-      );
-    }
-
-    // ==========================================
-    // 3. HARD (Zor)
-    // ==========================================
-    if (difficulty == BotDifficulty.hard) {
-      return _findBestMoveMinimax(
-        board: board,
-        legalMoves: legalMoves,
-        visitedInTurn: visitedInTurn,
-        botPlayer: botPlayer,
-        variant: variant,
-        maxDepth: 3,
-        useAdvancedHeuristics: true,
-      );
-    }
-
-    // ==========================================
-    // 4. EXPERT (Uzman)
-    // ==========================================
-    if (difficulty == BotDifficulty.expert) {
-      return _findBestMoveMinimax(
-        board: board,
-        legalMoves: legalMoves,
-        visitedInTurn: visitedInTurn,
-        botPlayer: botPlayer,
-        variant: variant,
-        maxDepth: 4,
-        useAdvancedHeuristics: true,
-      );
-    }
-
-    // ==========================================
-    // 5. MASTER (Yenilmez / En Güçlü)
-    // ==========================================
-    // 9x5 varyantında dallanma çok yüksek olduğu için derinlik 4, 3x3 ve 5x5'te 5 derinlik
-    final int masterDepth = (variant == FanoronaVariant.tsivy) ? 4 : 5;
-    return _findBestMoveMinimax(
-      board: board,
-      legalMoves: legalMoves,
-      visitedInTurn: visitedInTurn,
-      botPlayer: botPlayer,
-      variant: variant,
-      maxDepth: masterDepth,
-      useAdvancedHeuristics: true,
-      isMasterMode: true,
+    final (depth, nodes, milliseconds) = switch (difficulty) {
+      BotDifficulty.easy => (1, 0, 0),
+      BotDifficulty.medium => (2, 1500, 350),
+      BotDifficulty.hard => (3, 5000, 650),
+      BotDifficulty.expert => (4, 15000, 1000),
+      BotDifficulty.master => (5, 35000, 1500),
+    };
+    final search = _BotSearch(
+      botPlayer, variant,
+      advanced: difficulty.index >= BotDifficulty.hard.index,
+      extensions: difficulty == BotDifficulty.master ? 2 : 0,
+      maxNodes: nodes,
+      timeLimit: Duration(milliseconds: milliseconds),
     );
-  }
-
-  static Move _findBestMoveMinimax({
-    required Map<BoardPoint, PieceType> board,
-    required List<Move> legalMoves,
-    required PieceType botPlayer,
-    required FanoronaVariant variant,
-    required int maxDepth,
-    required bool useAdvancedHeuristics,
-    bool isMasterMode = false,
-    List<BoardPoint>? visitedInTurn,
-  }) {
-    final opponent = (botPlayer == PieceType.white) ? PieceType.black : PieceType.white;
-    Move bestMove = legalMoves.first;
-    int bestScore = -99999999;
-    int alpha = -99999999;
-    const int beta = 99999999;
-
-    // Hamle Sıralaması (Move Ordering): Yeme hamlelerini önce değerlendirerek budamayı (pruning) hızlandırıyoruz
-    legalMoves.sort((a, b) => b.capturedPieces.length.compareTo(a.capturedPieces.length));
-
-    for (final move in legalMoves) {
-      final simBoard = Map<BoardPoint, PieceType>.from(board);
-      _executeFullTurnSim(simBoard, move, botPlayer, variant, visitedInTurn);
-
-      final score = _alphaBeta(
-        board: simBoard,
-        depth: maxDepth - 1,
-        alpha: alpha,
-        beta: beta,
-        isMaximizing: false,
-        botPlayer: botPlayer,
-        opponent: opponent,
-        variant: variant,
-        useAdvancedHeuristics: useAdvancedHeuristics,
-        isMasterMode: isMasterMode,
-      );
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestMove = move;
+    _orderMoves(legalMoves);
+    // Discard an incomplete iteration, so a budget cutoff cannot favour moves
+    // simply because they happened to be searched first.
+    for (int currentDepth = 1; currentDepth <= depth; currentDepth++) {
+      try {
+        bestMove = search.choose(
+          board, legalMoves, currentDepth,
+          chainedPiece: chainedPiece,
+          visited: visitedInTurn ?? const [],
+        );
+      } on _SearchLimit {
+        break;
       }
-      alpha = max(alpha, bestScore);
     }
-
     return bestMove;
   }
+}
 
-  static int _alphaBeta({
-    required Map<BoardPoint, PieceType> board,
-    required int depth,
-    required int alpha,
-    required int beta,
-    required bool isMaximizing,
-    required PieceType botPlayer,
-    required PieceType opponent,
-    required FanoronaVariant variant,
-    required bool useAdvancedHeuristics,
-    required bool isMasterMode,
-  }) {
-    final currentPlayer = isMaximizing ? botPlayer : opponent;
+class _BotPosition {
+  final Map<BoardPoint, PieceType> board;
+  final PieceType player;
+  final BotDifficulty difficulty;
+  final FanoronaVariant variant;
+  final BoardPoint? chainedPiece;
+  final List<BoardPoint> visited;
+  final BoardPoint? direction;
+
+  const _BotPosition({required this.board, required this.player,
+    required this.difficulty, required this.variant, required this.chainedPiece,
+    required this.visited, required this.direction});
+}
+
+class _SearchLimit implements Exception {
+  const _SearchLimit();
+}
+
+class _BotSearch {
+  static const int _infinity = 100000000;
+  final PieceType bot;
+  final FanoronaVariant variant;
+  final bool advanced;
+  final int extensions;
+  final int maxNodes;
+  final Duration timeLimit;
+  final Stopwatch _clock = Stopwatch()..start();
+  int _nodes = 0;
+
+  _BotSearch(this.bot, this.variant, {required this.advanced,
+    required this.extensions, required this.maxNodes, required this.timeLimit});
+
+  void _visit() {
+    if (++_nodes > maxNodes || _clock.elapsed >= timeLimit) {
+      throw const _SearchLimit();
+    }
+  }
+
+  Move? choose(Map<BoardPoint, PieceType> board, List<Move> moves, int depth,
+      {required BoardPoint? chainedPiece, required List<BoardPoint> visited}) {
+    Move? best;
+    int score = -_infinity;
+    // The existing game permits ending a turn after a capture. Null tells the
+    // bot's chain callback to end its turn too.
+    if (chainedPiece != null) {
+      score = _search(board, _other(bot), depth - 1, extensions,
+        -_infinity, _infinity);
+    }
+    for (final move in moves) {
+      final value = _scoreMove(board, move, bot, depth, extensions,
+        score, _infinity, visited);
+      if (value > score) {
+        score = value;
+        best = move;
+      }
+    }
+    return best;
+  }
+
+  int _scoreMove(Map<BoardPoint, PieceType> board, Move move, PieceType player,
+      int depth, int extra, int alpha, int beta, List<BoardPoint> visited) {
+    final next = _afterMove(board, move, player);
+    if (move.isCapture) {
+      // A capture continuation belongs to the SAME player and search depth.
+      // Branch over all continuations instead of greedily choosing one chain.
+      return _search(next, player, depth, extra, alpha, beta,
+        chainedPiece: move.to,
+        visited: [...visited, move.from],
+        direction: BoardPoint(move.dx, move.dy));
+    }
+    return _search(next, _other(player), depth - 1,
+      depth <= 0 ? extra - 1 : extra, alpha, beta);
+  }
+
+  int _search(Map<BoardPoint, PieceType> board, PieceType player,
+      int depth, int extra, int alpha, int beta, {
+      BoardPoint? chainedPiece, List<BoardPoint> visited = const [],
+      BoardPoint? direction}) {
+    _visit();
+    if (!board.containsValue(bot)) {
+      return -1000000;
+    }
+    if (!board.containsValue(_other(bot))) {
+      return 1000000;
+    }
+
     final moves = FanoronaEngine.getLegalMoves(
-      board: board,
-      player: currentPlayer,
-      variant: variant,
+      board: board, player: player, variant: variant,
+      chainedPiece: chainedPiece, visitedInTurn: visited,
+      lastDirectionVector: direction,
     );
+    final maximizing = player == bot;
+    int best = maximizing ? -_infinity : _infinity;
 
-    // Terminal durum: Taşlar bitti mi veya geçerli hamle kalmadı mı?
-    if (moves.isEmpty) {
-      return isMaximizing ? -5000000 : 5000000;
-    }
-
-    if (depth <= 0) {
-      // Master modunda taktiksel taş yeme devam ediyorsa 1 adım daha uzat (Quiescence)
-      if (isMasterMode && moves.any((m) => m.isCapture)) {
-        return _quiescenceSearch(
-          board: board,
-          alpha: alpha,
-          beta: beta,
-          isMaximizing: isMaximizing,
-          botPlayer: botPlayer,
-          opponent: opponent,
-          variant: variant,
-          depthLimit: 2,
-        );
+    if (chainedPiece != null) {
+      best = _search(board, _other(player), depth - 1,
+        depth <= 0 ? extra - 1 : extra, alpha, beta);
+      if (maximizing) {
+        alpha = max(alpha, best);
+      } else {
+        beta = min(beta, best);
       }
-      return _evaluateState(board, botPlayer, opponent, variant, useAdvancedHeuristics);
-    }
-
-    // Move Ordering
-    moves.sort((a, b) => b.capturedPieces.length.compareTo(a.capturedPieces.length));
-
-    if (isMaximizing) {
-      int maxScore = -99999999;
-      for (final move in moves) {
-        final simBoard = Map<BoardPoint, PieceType>.from(board);
-        _executeFullTurnSim(simBoard, move, botPlayer, variant);
-
-        final eval = _alphaBeta(
-          board: simBoard,
-          depth: depth - 1,
-          alpha: alpha,
-          beta: beta,
-          isMaximizing: false,
-          botPlayer: botPlayer,
-          opponent: opponent,
-          variant: variant,
-          useAdvancedHeuristics: useAdvancedHeuristics,
-          isMasterMode: isMasterMode,
-        );
-
-        maxScore = max(maxScore, eval);
-        alpha = max(alpha, eval);
-        if (beta <= alpha) break; // Beta cut-off
+      if (moves.isEmpty || alpha >= beta) {
+        return best;
       }
-      return maxScore;
     } else {
-      int minScore = 99999999;
-      for (final move in moves) {
-        final simBoard = Map<BoardPoint, PieceType>.from(board);
-        _executeFullTurnSim(simBoard, move, opponent, variant);
-
-        final eval = _alphaBeta(
-          board: simBoard,
-          depth: depth - 1,
-          alpha: alpha,
-          beta: beta,
-          isMaximizing: true,
-          botPlayer: botPlayer,
-          opponent: opponent,
-          variant: variant,
-          useAdvancedHeuristics: useAdvancedHeuristics,
-          isMasterMode: isMasterMode,
-        );
-
-        minScore = min(minScore, eval);
-        beta = min(beta, eval);
-        if (beta <= alpha) break; // Alpha cut-off
+      // The current game declares wins by stone elimination, not immobility.
+      // Do not give a blocked position a fictitious winning score.
+      if (moves.isEmpty ||
+          (depth <= 0 && (extra <= 0 || !moves.first.isCapture))) {
+        return _evaluate(board, bot, variant, advanced: advanced);
       }
-      return minScore;
+      // At the horizon, Master extends forced captures. There is no stand-pat
+      // option here: passing BEFORE the first capture is not a legal move.
     }
-  }
 
-  // Quiescence Search: Taktiksel takas bitene kadar sadece yeme hamlelerini arar
-  static int _quiescenceSearch({
-    required Map<BoardPoint, PieceType> board,
-    required int alpha,
-    required int beta,
-    required bool isMaximizing,
-    required PieceType botPlayer,
-    required PieceType opponent,
-    required FanoronaVariant variant,
-    required int depthLimit,
-  }) {
-    final standPat = _evaluateState(board, botPlayer, opponent, variant, true);
-    if (depthLimit <= 0) return standPat;
-
-    if (isMaximizing) {
-      if (standPat >= beta) return beta;
-      alpha = max(alpha, standPat);
-
-      final captureMoves = FanoronaEngine.getLegalMoves(
-        board: board,
-        player: botPlayer,
-        variant: variant,
-      ).where((m) => m.isCapture).toList();
-
-      for (final move in captureMoves) {
-        final simBoard = Map<BoardPoint, PieceType>.from(board);
-        _executeFullTurnSim(simBoard, move, botPlayer, variant);
-
-        final score = _quiescenceSearch(
-          board: simBoard,
-          alpha: alpha,
-          beta: beta,
-          isMaximizing: false,
-          botPlayer: botPlayer,
-          opponent: opponent,
-          variant: variant,
-          depthLimit: depthLimit - 1,
-        );
-
-        alpha = max(alpha, score);
-        if (beta <= alpha) break;
+    _orderMoves(moves);
+    for (final move in moves) {
+      final value = _scoreMove(board, move, player, depth, extra,
+        alpha, beta, visited);
+      if (maximizing) {
+        best = max(best, value);
+        alpha = max(alpha, best);
+      } else {
+        best = min(best, value);
+        beta = min(beta, best);
       }
-      return alpha;
+      if (alpha >= beta) {
+        break;
+      }
+    }
+    return best;
+  }
+}
+
+PieceType _other(PieceType player) =>
+    player == PieceType.white ? PieceType.black : PieceType.white;
+
+Map<BoardPoint, PieceType> _afterMove(
+    Map<BoardPoint, PieceType> board, Move move, PieceType player) {
+  final next = Map<BoardPoint, PieceType>.of(board);
+  next[move.from] = PieceType.none;
+  next[move.to] = player;
+  for (final point in move.capturedPieces) {
+    next[point] = PieceType.none;
+  }
+  return next;
+}
+
+void _orderMoves(List<Move> moves) {
+  moves.sort((a, b) {
+    int order = b.capturedPieces.length.compareTo(a.capturedPieces.length);
+    if (order != 0) {
+      return order;
+    }
+    order = a.from.y.compareTo(b.from.y);
+    if (order != 0) {
+      return order;
+    }
+    order = a.from.x.compareTo(b.from.x);
+    if (order != 0) {
+      return order;
+    }
+    order = a.to.y.compareTo(b.to.y);
+    if (order != 0) {
+      return order;
+    }
+    order = a.to.x.compareTo(b.to.x);
+    return order != 0 ? order : a.captureType.index.compareTo(b.captureType.index);
+  });
+}
+
+int _evaluate(Map<BoardPoint, PieceType> board, PieceType bot,
+    FanoronaVariant variant, {bool advanced = false}) {
+  int own = 0;
+  int enemy = 0;
+  int position = 0;
+  final opponent = _other(bot);
+  final centerX = (variant.cols - 1) / 2;
+  final centerY = (variant.rows - 1) / 2;
+  for (final entry in board.entries) {
+    if (entry.value == PieceType.none) {
+      continue;
+    }
+    final ours = entry.value == bot;
+    if (ours) {
+      own++;
     } else {
-      if (standPat <= alpha) return alpha;
-      beta = min(beta, standPat);
-
-      final captureMoves = FanoronaEngine.getLegalMoves(
-        board: board,
-        player: opponent,
-        variant: variant,
-      ).where((m) => m.isCapture).toList();
-
-      for (final move in captureMoves) {
-        final simBoard = Map<BoardPoint, PieceType>.from(board);
-        _executeFullTurnSim(simBoard, move, opponent, variant);
-
-        final score = _quiescenceSearch(
-          board: simBoard,
-          alpha: alpha,
-          beta: beta,
-          isMaximizing: true,
-          botPlayer: botPlayer,
-          opponent: opponent,
-          variant: variant,
-          depthLimit: depthLimit - 1,
-        );
-
-        beta = min(beta, score);
-        if (beta <= alpha) break;
-      }
-      return beta;
+      enemy++;
     }
+    final point = entry.key;
+    final distance = (point.x - centerX).abs() + (point.y - centerY).abs();
+    final bonus = (point.isStrongIntersection ? 35 : 0) +
+        (10 - distance.toInt()) * 4;
+    position += ours ? bonus : -bonus;
   }
-
-  // Zincirleme dahil turun tamamını greedy simüle eden fonksiyon
-  static void _executeFullTurnSim(
-    Map<BoardPoint, PieceType> board,
-    Move firstMove,
-    PieceType player,
-    FanoronaVariant variant, [
-    List<BoardPoint>? visitedInTurn,
-  ]) {
-    _applyMove(board, firstMove, player);
-
-    if (!firstMove.isCapture) return;
-
-    // Zincirleme devamı
-    BoardPoint currentPos = firstMove.to;
-    final visited = <BoardPoint>[...?visitedInTurn, firstMove.from];
-    BoardPoint lastDir = BoardPoint(firstMove.dx, firstMove.dy);
-
-    while (true) {
-      final chainMoves = FanoronaEngine.getLegalMoves(
-        board: board,
-        player: player,
-        variant: variant,
-        chainedPiece: currentPos,
-        visitedInTurn: visited,
-        lastDirectionVector: lastDir,
-      ).where((m) => m.isCapture).toList();
-
-      if (chainMoves.isEmpty) break;
-
-      // En çok taş yiyen zincir adımını uygula (Greedy Chain)
-      chainMoves.sort((a, b) => b.capturedPieces.length.compareTo(a.capturedPieces.length));
-      final nextMove = chainMoves.first;
-
-      _applyMove(board, nextMove, player);
-      visited.add(nextMove.from);
-      lastDir = BoardPoint(nextMove.dx, nextMove.dy);
-      currentPos = nextMove.to;
-    }
+  if (own == 0) {
+    return -1000000;
   }
-
-  static void _applyMove(Map<BoardPoint, PieceType> board, Move move, PieceType player) {
-    board[move.from] = PieceType.none;
-    board[move.to] = player;
-    for (final cap in move.capturedPieces) {
-      board[cap] = PieceType.none;
-    }
+  if (enemy == 0) {
+    return 1000000;
   }
-
-  // Gelişmiş Fanorona Tahta Değerlendirme Motoru (Heuristic)
-  static int _evaluateState(
-    Map<BoardPoint, PieceType> board,
-    PieceType botPlayer,
-    PieceType opponent,
-    FanoronaVariant variant,
-    bool useAdvanced,
-  ) {
-    int botStones = 0;
-    int oppStones = 0;
-    int botPositionalBonus = 0;
-    int oppPositionalBonus = 0;
-
-    final centerX = (variant.cols - 1) / 2.0;
-    final centerY = (variant.rows - 1) / 2.0;
-
-    board.forEach((pt, piece) {
-      if (piece == botPlayer) {
-        botStones++;
-        if (useAdvanced) {
-          // 1. Güçlü Kesişim Düğümleri: 8 yönlü hareket avantajı
-          if (pt.isStrongIntersection) botPositionalBonus += 35;
-
-          // 2. Merkez Kontrolü: Merkeze yakın taşlar tahtanın her iki kanadına hızlı ulaşır
-          final dist = (pt.x - centerX).abs() + (pt.y - centerY).abs();
-          botPositionalBonus += (10 - dist.toInt()) * 4;
-        }
-      } else if (piece == opponent) {
-        oppStones++;
-        if (useAdvanced) {
-          if (pt.isStrongIntersection) oppPositionalBonus += 35;
-          final dist = (pt.x - centerX).abs() + (pt.y - centerY).abs();
-          oppPositionalBonus += (10 - dist.toInt()) * 4;
-        }
-      }
-    });
-
-    if (oppStones == 0) return 1000000;
-    if (botStones == 0) return -1000000;
-
-    int totalScore = (botStones - oppStones) * 1000;
-
-    if (useAdvanced) {
-      totalScore += (botPositionalBonus - oppPositionalBonus);
-
-      // 3. Hareketlilik (Mobility): Rakibin hamle sayısını kısıtlama
-      final botMovesCount = FanoronaEngine.getLegalMoves(board: board, player: botPlayer, variant: variant).length;
-      final oppMovesCount = FanoronaEngine.getLegalMoves(board: board, player: opponent, variant: variant).length;
-      totalScore += (botMovesCount - oppMovesCount) * 15;
-    }
-
-    return totalScore;
+  int score = (own - enemy) * 1000 + position;
+  if (advanced) {
+    final ownMoves = FanoronaEngine.getLegalMoves(
+      board: board, player: bot, variant: variant).length;
+    final enemyMoves = FanoronaEngine.getLegalMoves(
+      board: board, player: opponent, variant: variant).length;
+    score += (ownMoves - enemyMoves) * 15;
   }
+  return score;
 }
